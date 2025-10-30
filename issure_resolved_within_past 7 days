@@ -1,0 +1,96 @@
+WITH issue_workitem_history AS (
+  SELECT
+    c_pk,
+    c_uri,
+    c_id,
+    c_rev,
+    c_status,
+    c_type,
+    c_updated, -- 状态变更发生时间
+    fk_project,
+    LAG(c_status) OVER (PARTITION BY c_uri ORDER BY c_rev) AS previous_status
+  FROM polarion.workitem
+  WHERE c_deleted IS NOT TRUE
+    AND c_type = 'issue'
+),
+status_change_events AS (
+  SELECT *,
+    CASE WHEN c_status IS DISTINCT FROM previous_status THEN 1 ELSE 0 END AS is_status_change
+  FROM issue_workitem_history
+),
+filtered_events AS (
+  SELECT *,
+    ROW_NUMBER() OVER (PARTITION BY c_uri ORDER BY c_updated) AS rn
+  FROM status_change_events
+  WHERE is_status_change = 1
+    -- 筛选过去7天内的状态变更
+    AND c_updated >= NOW() - INTERVAL '7 days'
+),
+final_events AS (
+  SELECT
+    f.*,
+    CASE
+      WHEN LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated) IS NULL
+      THEN NOW()::timestamp
+      ELSE LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated)
+    END AS next_status_start_time,
+    AGE(
+      CASE
+        WHEN LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated) IS NULL
+        THEN NOW()::timestamp
+        ELSE LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated)
+      END,
+      f.c_updated
+    ) AS duration_interval,
+    EXTRACT(EPOCH FROM AGE(
+      CASE
+        WHEN LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated) IS NULL
+        THEN NOW()::timestamp
+        ELSE LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated)
+      END,
+      f.c_updated
+    ))::bigint AS duration_seconds,
+    CASE
+      WHEN LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated) IS NULL THEN TRUE
+      ELSE FALSE
+    END AS is_current_status,
+    f.previous_status || ' → ' || f.c_status AS from_to,
+    ROUND(
+      (EXTRACT(EPOCH FROM AGE(
+        CASE
+          WHEN LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated) IS NULL
+          THEN NOW()::timestamp
+          ELSE LEAD(f.c_updated) OVER (PARTITION BY f.c_uri ORDER BY f.c_updated)
+        END,
+        f.c_updated
+      )) / 86400.0)::numeric, 2
+    ) AS duration_days
+  FROM filtered_events f
+)
+SELECT
+  f.c_id AS workitem_id,
+  MAX(p.c_name) AS project_name,
+  MAX(f.c_status) AS target_status, -- 变更后的目标状态
+  MAX(f.c_updated) AS status_change_time, -- 状态变更时间
+  f.previous_status AS from_status, -- 变更前状态
+  MAX(CASE WHEN f.is_current_status THEN f.c_status END) AS current_status,
+  STRING_AGG(DISTINCT u.c_name, ',') AS assignee_name,
+  -- 新增：通过cf_workitem表提取Module字段值
+  MAX(CASE WHEN cf.c_name = 'Module' THEN cf.c_string_value END) AS 所属模块,
+  -- 新增：问题创建时间（用于2025年筛选）
+  MAX(wi.c_created) AS issue_created_time
+FROM final_events f
+JOIN polarion.project p ON f.fk_project = p.c_pk
+-- 关联workitem表获取创建时间
+JOIN polarion.workitem wi ON f.c_uri = wi.c_uri
+-- 关联自定义字段表获取Module属性
+LEFT JOIN polarion.cf_workitem cf ON f.c_pk = cf.fk_workitem
+-- 关联经办人信息
+LEFT JOIN polarion.rel_workitem_user_assignee r ON f.c_pk = r.fk_workitem
+LEFT JOIN polarion.t_user u ON r.fk_user = u.c_pk
+WHERE p.c_name IN ('AT128P-GMCE', 'ATX-BYD_SR','ATL-理想','ATX-LEAP','ATX-Zeekr_DC1E_A3','ATX-小米','ATX-AUDI_BNBe','ATX-长城','ATX-JMC_CX835','ATX-长安','ATX-奇瑞','HTBYD192','ATX_东风','ATX-岚图','ATX_GeelyP789','ATX-广汽丰田','ATLP-C500理想','ATX_标品','ETX_平台','ETX-小米','ETX-岚图','FT480','AT720-标品','ET30P-Gen6Evo')
+  AND f.c_status IN ('resolved') -- 只保留变更为resolved的记录
+  -- 筛选2025年1月1日之后创建的问题
+  AND wi.c_created >= '2025-01-01 00:00:00'
+GROUP BY f.c_id, f.previous_status
+ORDER BY status_change_time DESC;
