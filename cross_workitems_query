@@ -1,0 +1,16 @@
+type:issue AND project.id:(AT128PSW HTBYD MTLX ATXLEAP ATXZEEKR ATXXIAOMI HTAUDI ATXGWM MTJMC ATXCA ATXCHERY HTBYD192 ATX_DF ATXLanTu Geely_P789 ATX_GTMC C500 ATXS ETX_P ETXXIAOMI ETXVOYAH FT480 AT720STANDARD ET30PMB) 
+AND created:[20250101 TO 20251231] AND status:(done devLoop) AND Module.KEY:(diagnosticcommunication diagnosticsafety lidarfunction network operationsystem linux networkSafety) 
+AND NOT SQL:(--您可以在这里为查询添加更多的结果字段select * from WORKITEM--可在这里为表指定更多的关联条件where trueand WORKITEM.C_TYPE ='issue'
+AND EXISTS ( SELECT 1 FROM polarion.struct_workitem_linkedworkitems swl_child JOIN polarion.workitem child_wi ON child_wi.c_pk = swl_child.fk_p_workitem	join polarion.struct_plan_records spr on child_wi.c_pk = spr.fk_item		join polarion.plan pl on pl.c_pk=spr.fk_p_plan WHERE swl_child.fk_workitem = WORKITEM.c_pk AND child_wi.c_type IN ('workpackage')))
+
+
+--您可以在这里为查询添加更多的结果字段
+select * from WORKITEM
+--可在这里为表指定更多的关联条件
+where true
+and WORKITEM.C_TYPE ='issue'
+
+AND EXISTS ( SELECT 1 FROM polarion.struct_workitem_linkedworkitems swl_child JOIN polarion.workitem child_wi ON child_wi.c_pk = swl_child.fk_p_workitem
+	join polarion.struct_plan_records spr on child_wi.c_pk = spr.fk_item
+		join polarion.plan pl on pl.c_pk=spr.fk_p_plan WHERE swl_child.fk_workitem = WORKITEM.c_pk AND child_wi.c_type IN ('workpackage')
+)
