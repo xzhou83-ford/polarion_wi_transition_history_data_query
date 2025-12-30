@@ -1,0 +1,355 @@
+const axios = require('axios');
+const FormData = require('form-data');
+
+/**
+ * 文件上传函数 - 修复URL参数传递问题
+ * 
+ * Changelog：
+ * 1. 增强URL参数结构验证
+ * 2. 支持多种参数格式（数组、对象、字符串）
+ * 3. 添加详细的参数解析日志
+ * 4. 提供参数格式自动转换
+ * 5. 增强错误提示和调试信息
+ */
+module.exports = async function main(urls, token, baseToken) {
+    // ===== 详细的参数调试日志 =====
+    logger.info('=== 文件上传函数开始执行 ===');
+    logger.info('原始参数类型检查:');
+    logger.info('- urls 参数类型:', typeof urls);
+    logger.info('- urls 参数值:', JSON.stringify(urls, null, 2));
+    logger.info('- token 参数存在:', !!token);
+    logger.info('- baseToken 参数存在:', !!baseToken);
+    
+    // ===== 参数预处理和验证 =====
+    let processedUrls = [];
+    
+    try {
+        // 处理各种可能的urls参数格式
+        if (!urls) {
+            throw new Error('URLs参数不能为空');
+        }
+        
+        if (typeof urls === 'string') {
+            // 如果是字符串，尝试解析为JSON
+            logger.info('检测到字符串格式的urls参数，尝试解析为JSON');
+            try {
+                urls = JSON.parse(urls);
+                logger.info('JSON解析成功');
+            } catch (e) {
+                // 如果解析失败，假设是单个URL字符串
+                logger.info('JSON解析失败，作为单个URL字符串处理');
+                urls = [{ fileURL: urls }];
+            }
+        }
+        
+        if (Array.isArray(urls)) {
+            logger.info(`检测到数组格式，包含 ${urls.length} 个元素`);
+            processedUrls = urls.map((item, index) => {
+                logger.info(`处理数组元素 ${index}:`, JSON.stringify(item));
+                
+                if (typeof item === 'string') {
+                    // 数组元素是字符串
+                    logger.info(`元素 ${index} 是字符串，转换为对象格式`);
+                    return { fileURL: item };
+                } else if (typeof item === 'object' && item !== null) {
+                    if (item.fileURL) {
+                        // 标准格式
+                        logger.info(`元素 ${index} 包含 fileURL 字段`);
+                        return item;
+                    } else if (item.url) {
+                        // 可能是使用url字段而不是fileURL
+                        logger.info(`元素 ${index} 包含 url 字段，转换为 fileURL`);
+                        return { fileURL: item.url };
+                    } else {
+                        // 检查是否有其他可能的URL字段名
+                        const possibleUrlFields = ['fileURL', 'url', 'file_url', 'fileUrl', 'URL'];
+                        for (const field of possibleUrlFields) {
+                            if (item[field]) {
+                                logger.info(`元素 ${index} 找到 ${field} 字段，转换为 fileURL`);
+                                return { fileURL: item[field] };
+                            }
+                        }
+                        logger.warn(`元素 ${index} 未找到URL字段，将被跳过`);
+                        return null;
+                    }
+                } else {
+                    logger.warn(`元素 ${index} 格式不支持，将被跳过`);
+                    return null;
+                }
+            }).filter(item => item !== null); // 过滤掉无效的元素
+            
+        } else if (typeof urls === 'object' && urls !== null) {
+            // 单个对象的情况
+            logger.info('检测到单个对象格式的urls参数');
+            if (urls.fileURL) {
+                processedUrls = [urls];
+            } else {
+                // 检查其他可能的字段名
+                const possibleUrlFields = ['fileURL', 'url', 'file_url', 'fileUrl', 'URL'];
+                for (const field of possibleUrlFields) {
+                    if (urls[field]) {
+                        logger.info(`找到 ${field} 字段，转换为标准格式`);
+                        processedUrls = [{ fileURL: urls[field] }];
+                        break;
+                    }
+                }
+                if (processedUrls.length === 0) {
+                    throw new Error('URL对象中未找到有效的URL字段（支持 fileURL, url, file_url, fileUrl, URL）');
+                }
+            }
+        } else {
+            throw new Error(`不支持的URLs参数类型: ${typeof urls}`);
+        }
+        
+        logger.info(`参数预处理完成，有效URL数量: ${processedUrls.length}`);
+        
+        if (processedUrls.length === 0) {
+            throw new Error('没有有效的URL需要处理');
+        }
+        
+    } catch (error) {
+        logger.error('参数预处理失败:', error.message);
+        logger.error('原始参数:', JSON.stringify(urls));
+        throw error;
+    }
+    
+    // 验证必需参数
+    if (!token) {
+        throw new Error('Token参数不能为空');
+    }
+    if (!baseToken) {
+        throw new Error('BaseToken参数不能为空');
+    }
+    
+    logger.info(`开始文件上传，URLs数量: ${processedUrls.length}`);
+    
+    let attachments = [];
+    
+    // 循环处理每个URL
+    for (let i = 0; i < processedUrls.length; i++) {
+        const currentUrl = processedUrls[i];
+        logger.info(`\n处理第 ${i + 1} 个文件:`);
+        logger.info(`- URL: ${currentUrl.fileURL}`);
+        logger.info(`- 原始对象:`, JSON.stringify(currentUrl));
+        
+        try {
+            // 验证URL格式
+            if (!currentUrl.fileURL || typeof currentUrl.fileURL !== 'string') {
+                logger.error(`第 ${i + 1} 个URL无效: fileURL字段缺失或格式错误`);
+                continue;
+            }
+            
+            // 验证URL基本格式
+            try {
+                new URL(currentUrl.fileURL);
+            } catch (urlError) {
+                logger.error(`第 ${i + 1} 个URL格式错误: ${currentUrl.fileURL}`);
+                continue;
+            }
+            
+            // 下载文件
+            let imageBuffer;
+            let fileName = 'uploaded_file.pcapng'; // 默认文件名
+            let mimeType = 'application/octet-stream'; // 默认MIME类型
+            let fileSize = 0;
+            
+            logger.info(`开始下载文件: ${currentUrl.fileURL}`);
+            
+            try {
+                const response = await axios({
+                    url: currentUrl.fileURL,
+                    method: 'GET',
+                    responseType: 'arraybuffer',
+                    timeout: 30000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    },
+                    // 添加重试机制
+                    validateStatus: function (status) {
+                        return status >= 200 && status < 300; // 默认行为
+                    }
+                });
+                
+                imageBuffer = Buffer.from(response.data);
+                fileSize = imageBuffer.byteLength;
+                
+                logger.info(`文件下载成功，大小: ${fileSize} bytes`);
+                
+                // 获取文件名
+                const contentDisposition = response.headers['content-disposition'];
+                if (contentDisposition) {
+                    const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+                    if (filenameMatch && filenameMatch[1]) {
+                        fileName = filenameMatch[1];
+                        logger.info(`从Content-Disposition获取文件名: ${fileName}`);
+                    }
+                }
+                
+                // 从URL路径获取文件名
+                if (fileName === 'uploaded_file') {
+                    const urlPath = new URL(currentUrl.fileURL).pathname;
+                    const extractedFileName = urlPath.split('/').pop();
+                    if (extractedFileName && extractedFileName.includes('.')) {
+                        fileName = extractedFileName;
+                        logger.info(`从URL路径获取文件名: ${fileName}`);
+                    }
+                }
+                
+                // 获取MIME类型
+                if (response.headers['content-type']) {
+                    mimeType = response.headers['content-type'].split(';')[0];
+                    logger.info(`从响应头获取MIME类型: ${mimeType}`);
+                } else {
+                    // 根据文件扩展名推断MIME类型
+                    const ext = fileName.split('.').pop().toLowerCase();
+                    const mimeTypes = {
+                        'png': 'image/png',
+                        'jpg': 'image/jpeg',
+                        'jpeg': 'image/jpeg',
+                        'gif': 'image/gif',
+                        'pdf': 'application/pdf',
+                        'doc': 'application/msword',
+                        'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        'txt': 'text/plain',
+                        'json': 'application/json'
+                    };
+                    mimeType = mimeTypes[ext] || 'application/octet-stream';
+                    logger.info(`根据扩展名推断MIME类型: ${mimeType}`);
+                }
+                
+                // 文件大小检查
+                if (fileSize === 0) {
+                    logger.error(`第 ${i + 1} 个文件为空`);
+                    continue;
+                }
+                
+                if (fileSize > 50 * 1024 * 1024) { // 50MB限制
+                    logger.error(`第 ${i + 1} 个文件超过大小限制 (50MB): ${(fileSize / 1024 / 1024).toFixed(2)}MB`);
+                    continue;
+                }
+                
+            } catch (downloadError) {
+                logger.error(`第 ${i + 1} 个文件下载失败:`);
+                logger.error(`- 错误信息: ${downloadError.message}`);
+                if (downloadError.response) {
+                    logger.error(`- HTTP状态码: ${downloadError.response.status}`);
+                    logger.error(`- 响应数据: ${JSON.stringify(downloadError.response.data)}`);
+                }
+                continue;
+            }
+            
+            // 创建FormData
+            const formData = new FormData();
+            
+            // 添加文件（关键修复点）
+            formData.append('file', imageBuffer, {
+                filename: fileName,
+                contentType: mimeType
+            });
+            
+            // 添加其他必需的表单字段
+            formData.append('file_name', fileName);
+            formData.append('parent_type', 'bitable_image');
+            formData.append('parent_node', baseToken);
+            formData.append('size', fileSize);
+            
+            logger.info(`准备上传文件:`);
+            logger.info(`- 文件名: ${fileName}`);
+            logger.info(`- MIME类型: ${mimeType}`);
+            logger.info(`- 文件大小: ${fileSize} bytes`);
+            logger.info(`- 父节点: ${baseToken}`);
+            
+            // 配置文件上传请求
+            const config = {
+                method: 'post',
+                url: 'https://open.feishu.cn/open-apis/drive/v1/medias/upload_all',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    ...formData.getHeaders()
+                },
+                data: formData,
+                timeout: 60000,
+                maxContentLength: 50 * 1024 * 1024,
+                maxBodyLength: 50 * 1024 * 1024
+            };
+            
+            // 执行文件上传
+            try {
+                logger.info(`开始上传第 ${i + 1} 个文件到飞书...`);
+                const response = await axios(config);
+                const resp = response.data;
+                
+                logger.info(`第 ${i + 1} 个文件上传响应:`);
+                logger.info(`- HTTP状态码: ${response.status}`);
+                logger.info(`- 响应数据:`, JSON.stringify(resp));
+                
+                // 验证响应
+                if (resp && resp.code === 0 && resp.data && resp.data.file_token) {
+                    const fileToken = resp.data.file_token;
+                    logger.info(`✅ 第 ${i + 1} 个文件上传成功！`);
+                    logger.info(`- file_token: ${fileToken}`);
+                    
+                    attachments.push({
+                        file_token: fileToken,
+                        file_name: fileName,
+                        size: fileSize,
+                        mime_type: mimeType,
+                        upload_index: i,
+                        upload_status: 'success'
+                    });
+                } else {
+                    logger.error(`❌ 第 ${i + 1} 个文件上传失败:`);
+                    logger.error(`- 错误码: ${resp?.code}`);
+                    logger.error(`- 错误消息: ${resp?.msg}`);
+                    logger.error(`- 完整响应:`, JSON.stringify(resp));
+                    
+                    attachments.push({
+                        file_name: fileName,
+                        size: fileSize,
+                        upload_index: i,
+                        upload_status: 'failed',
+                        error_code: resp?.code,
+                        error_message: resp?.msg
+                    });
+                }
+                
+            } catch (uploadError) {
+                logger.error(`❌ 第 ${i + 1} 个文件上传请求失败:`);
+                
+                if (uploadError.response) {
+                    logger.error(`- HTTP状态码: ${uploadError.response.status}`);
+                    logger.error(`- 响应头:`, JSON.stringify(uploadError.response.headers));
+                    logger.error(`- 响应数据:`, JSON.stringify(uploadError.response.data));
+                } else if (uploadError.request) {
+                    logger.error(`- 请求超时或无响应`);
+                    logger.error(`- 请求配置:`, JSON.stringify(uploadError.config));
+                } else {
+                    logger.error(`- 请求配置错误: ${uploadError.message}`);
+                }
+                
+                attachments.push({
+                    file_name: fileName,
+                    size: fileSize,
+                    upload_index: i,
+                    upload_status: 'error',
+                    error_message: uploadError.message
+                });
+            }
+            
+        } catch (innerError) {
+            logger.error(`处理第 ${i + 1} 个文件时发生未预期的错误:`, innerError);
+            continue;
+        }
+    }
+    
+    logger.info('\n=== 文件上传处理完成 ===');
+    logger.info(`总计处理: ${processedUrls.length} 个文件`);
+    logger.info(`成功上传: ${attachments.filter(item => item.upload_status === 'success').length} 个文件`);
+    logger.info(`失败: ${attachments.filter(item => item.upload_status !== 'success').length} 个文件`);
+    
+    if (attachments.length === 0) {
+        logger.warn('⚠️  没有任何文件成功上传');
+    }
+    
+    return attachments;
+}
